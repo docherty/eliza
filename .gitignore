@@ -34,7 +34,11 @@ twitter_cookies.json
 timeline_cache.json
 
 *.sqlite
-characters/
+
+# Ignore all *.json files (e.g. naval.json)
+characters/*.json
+# Allow anything with the *.character.json extension to be tracked (e.g. trump.character.json)
+!characters/*.character.json 
 
 packages/core/src/providers/cache
 packages/core/src/providers/cache/*
