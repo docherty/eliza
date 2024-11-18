@@ -17,24 +17,19 @@ import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { dirname } from "path";
 
 import { glob } from "glob";
 
 import { elizaLogger } from "@ai16z/eliza/src/logger.ts";
 import { stringToUuid } from "@ai16z/eliza/src/uuid.ts";
 
-export function extractAnswer(text: string): string {
-    const startIndex = text.indexOf("Answer: ") + 8;
-    const endIndex = text.indexOf("<|endoftext|>", 11);
-    return text.slice(startIndex, endIndex);
-}
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Add this class definition before the ClientBase class
 
 class RequestQueue {
-    private queue: (() => Promise<any>)[] = [];
+    private queue: Array<() => Promise<any>> = [];
     private processing: boolean = false;
+    private readonly delay: number = 1000; // 1 second delay between requests
 
     async add<T>(request: () => Promise<T>): Promise<T> {
         return new Promise((resolve, reject) => {
@@ -46,49 +41,46 @@ class RequestQueue {
                     reject(error);
                 }
             });
-            this.processQueue();
+            this.process();
         });
     }
 
-    private async processQueue(): Promise<void> {
-        if (this.processing || this.queue.length === 0) {
-            return;
-        }
+    private async process(): Promise<void> {
+        if (this.processing || this.queue.length === 0) return;
+
         this.processing = true;
-
         while (this.queue.length > 0) {
-            const request = this.queue.shift()!;
-            try {
-                await request();
-            } catch (error) {
-                console.error("Error processing request:", error);
-                this.queue.unshift(request);
-                await this.exponentialBackoff(this.queue.length);
+            const request = this.queue.shift();
+            if (request) {
+                try {
+                    await request();
+                } catch (error) {
+                    console.error('Error processing request:', error);
+                }
+                // Add delay between requests to respect rate limits
+                await new Promise(resolve => setTimeout(resolve, this.delay));
             }
-            await this.randomDelay();
         }
-
         this.processing = false;
-    }
-
-    private async exponentialBackoff(retryCount: number): Promise<void> {
-        const delay = Math.pow(2, retryCount) * 1000;
-        await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-
-    private async randomDelay(): Promise<void> {
-        const delay = Math.floor(Math.random() * 2000) + 1500;
-        await new Promise((resolve) => setTimeout(resolve, delay));
     }
 }
 
-export class ClientBase extends EventEmitter {
+export interface IClientBase {
+    runtime: IAgentRuntime;
+    twitterClient: Scraper;
+    // ... other required properties
+}
+
+export class ClientBase extends EventEmitter implements IClientBase {
+    private static instance: ClientBase;
+    private isInitializing = false;
     static _twitterClient: Scraper;
     twitterClient: Scraper;
     runtime: IAgentRuntime;
     directions: string;
     lastCheckedTweetId: number | null = null;
-    tweetCacheFilePath = __dirname + "/tweetcache/latest_checked_tweet_id.txt";
+    private baseDir = dirname(fileURLToPath(import.meta.url));
+    tweetCacheFilePath = path.join(this.baseDir, "tweetcache/latest_checked_tweet_id.txt");
     imageDescriptionService: IImageDescriptionService;
     temperature: number = 0.5;
 
@@ -102,7 +94,7 @@ export class ClientBase extends EventEmitter {
             return;
         }
         const cacheDir = path.join(
-            __dirname,
+            this.baseDir,
             "tweetcache",
             tweet.conversationId,
             `${tweet.id}.json`
@@ -118,7 +110,7 @@ export class ClientBase extends EventEmitter {
         }
 
         const cacheFile = path.join(
-            __dirname,
+            this.baseDir,
             "tweetcache",
             "*",
             `${tweetId}.json`
@@ -147,16 +139,22 @@ export class ClientBase extends EventEmitter {
         return tweet;
     }
 
-    callback: (self: ClientBase) => any = null;
-
-    onReady() {
-        throw new Error(
-            "Not implemented in base class, please call from subclass"
-        );
+    protected onReady(): void {
+        // Remove the console.log and make this a no-op base method
     }
 
-    constructor({ runtime }: { runtime: IAgentRuntime }) {
+    // Modify the constructor to be protected instead of private
+    protected constructor({ runtime }: { runtime: IAgentRuntime }) {
         super();
+        
+        // Check instance-specific initialization
+        if (this.isInitializing) {
+            console.log(`[${this.constructor.name}] Already initializing, skipping`);
+            return;
+        }
+        this.isInitializing = true;
+
+        console.log(`[${this.constructor.name}] Starting initialization...`);
         this.runtime = runtime;
         if (ClientBase._twitterClient) {
             this.twitterClient = ClientBase._twitterClient;
@@ -188,7 +186,7 @@ export class ClientBase extends EventEmitter {
             );
         }
         const cookiesFilePath = path.join(
-            __dirname,
+            this.baseDir,
             "tweetcache/" +
                 this.runtime.getSetting("TWITTER_USERNAME") +
                 "_cookies.json"
@@ -201,83 +199,105 @@ export class ClientBase extends EventEmitter {
 
         // async initialization
         (async () => {
-            // Check for Twitter cookies
-            if (this.runtime.getSetting("TWITTER_COOKIES")) {
-                const cookiesArray = JSON.parse(
-                    this.runtime.getSetting("TWITTER_COOKIES")
-                );
-                await this.setCookiesFromArray(cookiesArray);
-            } else {
-                console.log("Cookies file path:", cookiesFilePath);
-                if (fs.existsSync(cookiesFilePath)) {
+            try {
+                console.log(`[${this.constructor.name}] Starting async initialization...`);
+                
+                // Check for Twitter cookies
+                if (this.runtime.getSetting("TWITTER_COOKIES")) {
                     const cookiesArray = JSON.parse(
-                        fs.readFileSync(cookiesFilePath, "utf-8")
+                        this.runtime.getSetting("TWITTER_COOKIES")
                     );
                     await this.setCookiesFromArray(cookiesArray);
                 } else {
-                    await this.twitterClient.login(
-                        this.runtime.getSetting("TWITTER_USERNAME"),
-                        this.runtime.getSetting("TWITTER_PASSWORD"),
-                        this.runtime.getSetting("TWITTER_EMAIL"),
-                        this.runtime.getSetting("TWITTER_2FA_SECRET")
-                    );
-                    console.log("Logged in to Twitter");
-                    const cookies = await this.twitterClient.getCookies();
-                    fs.writeFileSync(
-                        cookiesFilePath,
-                        JSON.stringify(cookies),
-                        "utf-8"
-                    );
+                    console.log("Cookies file path:", cookiesFilePath);
+                    if (fs.existsSync(cookiesFilePath)) {
+                        const cookiesArray = JSON.parse(
+                            fs.readFileSync(cookiesFilePath, "utf-8")
+                        );
+                        await this.setCookiesFromArray(cookiesArray);
+                    } else {
+                        await this.twitterClient.login(
+                            this.runtime.getSetting("TWITTER_USERNAME"),
+                            this.runtime.getSetting("TWITTER_PASSWORD"),
+                            this.runtime.getSetting("TWITTER_EMAIL"),
+                            this.runtime.getSetting("TWITTER_2FA_SECRET")
+                        );
+                        console.log("Logged in to Twitter");
+                        const cookies = await this.twitterClient.getCookies();
+                        fs.writeFileSync(
+                            cookiesFilePath,
+                            JSON.stringify(cookies),
+                            "utf-8"
+                        );
+                    }
                 }
-            }
 
-            let loggedInWaits = 0;
+                let loggedInWaits = 0;
 
-            while (!(await this.twitterClient.isLoggedIn())) {
-                console.log("Waiting for Twitter login");
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-                if (loggedInWaits > 10) {
-                    console.error("Failed to login to Twitter");
-                    await this.twitterClient.login(
-                        this.runtime.getSetting("TWITTER_USERNAME"),
-                        this.runtime.getSetting("TWITTER_PASSWORD"),
-                        this.runtime.getSetting("TWITTER_EMAIL"),
-                        this.runtime.getSetting("TWITTER_2FA_SECRET")
-                    );
+                while (!(await this.twitterClient.isLoggedIn())) {
+                    console.log(`[${this.constructor.name}] Waiting for Twitter login...`);
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                    if (loggedInWaits > 10) {
+                        console.error("Failed to login to Twitter");
+                        await this.twitterClient.login(
+                            this.runtime.getSetting("TWITTER_USERNAME"),
+                            this.runtime.getSetting("TWITTER_PASSWORD"),
+                            this.runtime.getSetting("TWITTER_EMAIL"),
+                            this.runtime.getSetting("TWITTER_2FA_SECRET")
+                        );
 
-                    const cookies = await this.twitterClient.getCookies();
-                    fs.writeFileSync(
-                        cookiesFilePath,
-                        JSON.stringify(cookies),
-                        "utf-8"
-                    );
-                    loggedInWaits = 0;
+                        const cookies = await this.twitterClient.getCookies();
+                        fs.writeFileSync(
+                            cookiesFilePath,
+                            JSON.stringify(cookies),
+                            "utf-8"
+                        );
+                        loggedInWaits = 0;
+                    }
+                    loggedInWaits++;
                 }
-                loggedInWaits++;
-            }
-            const userId = await this.requestQueue.add(async () => {
-                // wait 3 seconds before getting the user id
-                await new Promise((resolve) => setTimeout(resolve, 10000));
-                try {
-                    return await this.twitterClient.getUserIdByScreenName(
-                        this.runtime.getSetting("TWITTER_USERNAME")
-                    );
-                } catch (error) {
-                    console.error("Error getting user ID:", error);
-                    return null;
+                const userId = await this.requestQueue.add(async () => {
+                    console.log(`[${this.constructor.name}] Getting user ID...`);
+                    // wait 3 seconds before getting the user id
+                    await new Promise((resolve) => setTimeout(resolve, 10000));
+                    try {
+                        return await this.twitterClient.getUserIdByScreenName(
+                            this.runtime.getSetting("TWITTER_USERNAME")
+                        );
+                    } catch (error) {
+                        console.error("Error getting user ID:", error);
+                        return null;
+                    }
+                });
+                if (!userId) {
+                    console.error(`[${this.constructor.name}] Failed to get user ID`);
+                    return;
                 }
-            });
-            if (!userId) {
-                console.error("Failed to get user ID");
-                return;
+                console.log(`[${this.constructor.name}] Got user ID:`, userId);
+                this.twitterUserId = userId;
+
+                await this.populateTimeline();
+                console.log(`[${this.constructor.name}] Timeline populated, calling onReady...`);
+                
+                this.onReady();
+                console.log(`[${this.constructor.name}] onReady called`);
+                
+                // Reset initialization flag after completion
+                this.isInitializing = false;
+            } catch (error) {
+                console.error(`[${this.constructor.name}] Error during async initialization:`, error);
+                this.isInitializing = false;
             }
-            console.log("Twitter user ID:", userId);
-            this.twitterUserId = userId;
-
-            await this.populateTimeline();
-
-            this.onReady();
         })();
+    }
+
+    // Modify getInstance to create the correct subclass instance
+    public static getInstance(config: { runtime: IAgentRuntime }): ClientBase {
+        if (!ClientBase.instance) {
+            // This should be called from a subclass
+            throw new Error("getInstance must be called from a subclass");
+        }
+        return ClientBase.instance;
     }
 
     async fetchHomeTimeline(count: number): Promise<Tweet[]> {
@@ -287,48 +307,39 @@ export class ClientBase extends EventEmitter {
         );
 
         return homeTimeline
-            .filter((t) => t.__typename !== "TweetWithVisibilityResults")
+            .filter((t) => {
+                // Filter out invalid tweets and TweetWithVisibilityResults
+                return t && 
+                       t.__typename !== "TweetWithVisibilityResults" &&
+                       (t.text || t.legacy?.full_text) &&  // Ensure there's text content
+                       (t.name || t.core?.user_results?.result?.legacy?.name) && // Ensure there's a name
+                       (t.username || t.core?.user_results?.result?.legacy?.screen_name); // Ensure there's a username
+            })
             .map((tweet) => {
-                console.log("tweet is", tweet);
-                const obj = {
-                    id: tweet.rest_id,
-                    name:
-                        tweet.name ??
-                        tweet.core?.user_results?.result?.legacy.name,
-                    username:
-                        tweet.username ??
-                        tweet.core?.user_results?.result?.legacy.screen_name,
-                    text: tweet.text ?? tweet.legacy?.full_text,
-                    inReplyToStatusId:
-                        tweet.inReplyToStatusId ??
-                        tweet.legacy?.in_reply_to_status_id_str,
-                    createdAt: tweet.createdAt ?? tweet.legacy?.created_at,
-                    userId: tweet.userId ?? tweet.legacy?.user_id_str,
-                    conversationId:
-                        tweet.conversationId ??
-                        tweet.legacy?.conversation_id_str,
-                    hashtags: tweet.hashtags ?? tweet.legacy?.entities.hashtags,
-                    mentions:
-                        tweet.mentions ?? tweet.legacy?.entities.user_mentions,
-                    photos:
-                        tweet.photos ??
-                        tweet.legacy?.entities.media?.filter(
-                            (media) => media.type === "photo"
-                        ) ??
-                        [],
+                const text = tweet.text ?? tweet.legacy?.full_text ?? "";
+                const name = tweet.name ?? tweet.core?.user_results?.result?.legacy?.name ?? "Unknown User";
+                const username = tweet.username ?? tweet.core?.user_results?.result?.legacy?.screen_name ?? "unknown";
+                
+                return {
+                    id: tweet.rest_id ?? `temp-${Date.now()}`,
+                    name,
+                    username,
+                    text,
+                    inReplyToStatusId: tweet.inReplyToStatusId ?? tweet.legacy?.in_reply_to_status_id_str ?? null,
+                    createdAt: tweet.createdAt ?? tweet.legacy?.created_at ?? new Date().toISOString(),
+                    userId: tweet.userId ?? tweet.legacy?.user_id_str ?? "unknown",
+                    conversationId: tweet.conversationId ?? tweet.legacy?.conversation_id_str ?? tweet.rest_id ?? `temp-${Date.now()}`,
+                    hashtags: tweet.hashtags ?? tweet.legacy?.entities?.hashtags ?? [],
+                    mentions: tweet.mentions ?? tweet.legacy?.entities?.user_mentions ?? [],
+                    photos: tweet.photos ?? 
+                        (tweet.legacy?.entities?.media?.filter(media => media.type === "photo") ?? []),
                     thread: [],
-                    urls: tweet.urls ?? tweet.legacy?.entities.urls,
-                    videos:
-                        tweet.videos ??
-                        tweet.legacy?.entities.media?.filter(
-                            (media) => media.type === "video"
-                        ) ??
-                        [],
+                    urls: tweet.urls ?? tweet.legacy?.entities?.urls ?? [],
+                    videos: tweet.videos ?? 
+                        (tweet.legacy?.entities?.media?.filter(media => media.type === "video") ?? []),
+                    timestamp: Math.floor(Date.now() / 1000), // Add timestamp field
+                    permanentUrl: `https://twitter.com/${username}/status/${tweet.rest_id}`,
                 };
-
-                console.log("obj is", obj);
-
-                return obj;
             });
     }
 

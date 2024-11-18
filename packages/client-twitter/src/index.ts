@@ -7,20 +7,31 @@ class TwitterAllClient {
     post: TwitterPostClient;
     search: TwitterSearchClient;
     interaction: TwitterInteractionClient;
-    constructor(runtime: IAgentRuntime) {
-        this.post = new TwitterPostClient(runtime);
-        // this.search = new TwitterSearchClient(runtime); // don't start the search client by default
-        // this searches topics from character file, but kind of violates consent of random users
-        // burns your rate limit and can get your account banned
-        // use at your own risk
-        this.interaction = new TwitterInteractionClient(runtime);
+
+    private static instance: TwitterAllClient | null = null;
+
+    private constructor(runtime: IAgentRuntime) {
+        console.log("[TwitterAllClient] Initializing...");
+        
+        // Create instances using getInstance pattern
+        this.post = TwitterPostClient.getInstance({ runtime });
+        this.interaction = TwitterInteractionClient.getInstance({ runtime });
+        
+        console.log("[TwitterAllClient] All clients initialized");
+    }
+
+    public static getInstance(runtime: IAgentRuntime): TwitterAllClient {
+        if (!TwitterAllClient.instance) {
+            TwitterAllClient.instance = new TwitterAllClient(runtime);
+        }
+        return TwitterAllClient.instance;
     }
 }
 
 export const TwitterClientInterface: Client = {
     async start(runtime: IAgentRuntime) {
-        console.log("Twitter client started");
-        return new TwitterAllClient(runtime);
+        console.log("Twitter client starting...");
+        return TwitterAllClient.getInstance(runtime);
     },
     async stop(runtime: IAgentRuntime) {
         console.warn("Twitter client does not support stopping yet");
