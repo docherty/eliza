@@ -1,7 +1,11 @@
 import { SearchMode } from "agent-twitter-client";
-import { composeContext } from "@ai16z/eliza";
-import { generateMessageResponse, generateText } from "@ai16z/eliza";
-import { messageCompletionFooter } from "@ai16z/eliza";
+import fs from "fs";
+import { composeContext } from "@ai16z/eliza/src/context.ts";
+import {
+    generateMessageResponse,
+    generateText,
+} from "@ai16z/eliza/src/generation.ts";
+import { messageCompletionFooter } from "@ai16z/eliza/src/parsing.ts";
 import {
     Content,
     HandlerCallback,
@@ -10,10 +14,10 @@ import {
     ModelClass,
     ServiceType,
     State,
-} from "@ai16z/eliza";
-import { stringToUuid } from "@ai16z/eliza";
-import { ClientBase } from "./base";
-import { buildConversationThread, sendTweet, wait } from "./utils.ts";
+} from "@ai16z/eliza/src/types.ts";
+import { stringToUuid } from "@ai16z/eliza/src/uuid.ts";
+import { ClientBase } from "./base.ts";
+import { buildConversationThread, num, sendTweet, wait } from "./utils.ts";
 
 const twitterSearchTemplate =
     `{{timeline}}
@@ -57,10 +61,14 @@ export class TwitterSearchClient extends ClientBase {
     }
 
     private engageWithSearchTermsLoop() {
+        console.warn("Debug: disabled twitter search term loop");
+        // TODO: this whole constructor needs to be avoided
+        return;
         this.engageWithSearchTerms();
+        const delayMins = num(60, 120);
         setTimeout(
             () => this.engageWithSearchTermsLoop(),
-            (Math.floor(Math.random() * (120 - 60 + 1)) + 60) * 60 * 1000
+            delayMins * 60 * 1000
         );
     }
 
@@ -71,6 +79,9 @@ export class TwitterSearchClient extends ClientBase {
                 Math.floor(Math.random() * this.runtime.character.topics.length)
             ];
 
+            if (!fs.existsSync("tweetcache")) {
+                fs.mkdirSync("tweetcache");
+            }
             console.log("Fetching search tweets");
             // TODO: we wait 5 seconds here to avoid getting rate limited on startup, but we should queue
             await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -82,8 +93,10 @@ export class TwitterSearchClient extends ClientBase {
             console.log("Search tweets fetched");
 
             const homeTimeline = await this.fetchHomeTimeline(50);
-
-            await this.cacheTimeline(homeTimeline);
+            fs.writeFileSync(
+                "tweetcache/home_timeline.json",
+                JSON.stringify(homeTimeline, null, 2)
+            );
 
             const formattedHomeTimeline =
                 `# ${this.runtime.character.name}'s Home Timeline\n\n` +
@@ -231,7 +244,6 @@ export class TwitterSearchClient extends ClientBase {
                     .getService<IImageDescriptionService>(
                         ServiceType.IMAGE_DESCRIPTION
                     )
-                    .getInstance()
                     .describeImage(photo.url);
                 imageDescriptions.push(description);
             }
@@ -313,12 +325,9 @@ export class TwitterSearchClient extends ClientBase {
 
                 this.respondedTweets.add(selectedTweet.id);
                 const responseInfo = `Context:\n\n${context}\n\nSelected Post: ${selectedTweet.id} - ${selectedTweet.username}: ${selectedTweet.text}\nAgent's Output:\n${response.text}`;
+                const debugFileName = `tweetcache/tweet_generation_${selectedTweet.id}.txt`;
 
-                await this.runtime.cacheManager.set(
-                    `twitter/tweet_generation_${selectedTweet.id}.txt`,
-                    responseInfo
-                );
-
+                fs.writeFileSync(debugFileName, responseInfo);
                 await wait();
             } catch (error) {
                 console.error(`Error sending response post: ${error}`);

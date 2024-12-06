@@ -1,11 +1,13 @@
-import { embed, getEmbeddingZeroVector } from "./embedding.ts";
-import elizaLogger from "./logger.ts";
+import { embed } from "./embedding.ts";
 import {
     IAgentRuntime,
     IMemoryManager,
     type Memory,
     type UUID,
 } from "./types.ts";
+
+export const embeddingDimension = 1536;
+export const embeddingZeroVector = Array(embeddingDimension).fill(0);
 
 const defaultMatchThreshold = 0.1;
 const defaultMatchCount = 10;
@@ -40,39 +42,16 @@ export class MemoryManager implements IMemoryManager {
      * @param memory The memory object to add an embedding to.
      * @returns A Promise resolving to the memory object, potentially updated with an embedding vector.
      */
-    /**
-     * Adds an embedding vector to a memory object if one doesn't already exist.
-     * The embedding is generated from the memory's text content using the runtime's
-     * embedding model. If the memory has no text content, an error is thrown.
-     *
-     * @param memory The memory object to add an embedding to
-     * @returns The memory object with an embedding vector added
-     * @throws Error if the memory content is empty
-     */
     async addEmbeddingToMemory(memory: Memory): Promise<Memory> {
-        // Return early if embedding already exists
         if (memory.embedding) {
             return memory;
         }
 
         const memoryText = memory.content.text;
-
-        // Validate memory has text content
-        if (!memoryText) {
-            throw new Error(
-                "Cannot generate embedding: Memory content is empty"
-            );
-        }
-
-        try {
-            // Generate embedding from text content
-            memory.embedding = await embed(this.runtime, memoryText);
-        } catch (error) {
-            elizaLogger.error("Failed to generate embedding:", error);
-            // Fallback to zero vector if embedding fails
-            memory.embedding = getEmbeddingZeroVector().slice();
-        }
-
+        if (!memoryText) throw new Error("Memory content is empty");
+        memory.embedding = memoryText
+            ? await embed(this.runtime, memoryText)
+            : embeddingZeroVector.slice();
         return memory;
     }
 
@@ -88,24 +67,27 @@ export class MemoryManager implements IMemoryManager {
         roomId,
         count = 10,
         unique = true,
+        agentId,
         start,
         end,
     }: {
         roomId: UUID;
         count?: number;
         unique?: boolean;
+        agentId?: UUID;
         start?: number;
         end?: number;
     }): Promise<Memory[]> {
-        return await this.runtime.databaseAdapter.getMemories({
+        const result = await this.runtime.databaseAdapter.getMemories({
             roomId,
             count,
             unique,
             tableName: this.tableName,
-            agentId: this.runtime.agentId,
+            agentId,
             start,
             end,
         });
+        return result;
     }
 
     async getCachedEmbeddings(content: string): Promise<
@@ -114,14 +96,15 @@ export class MemoryManager implements IMemoryManager {
             levenshtein_score: number;
         }[]
     > {
-        return await this.runtime.databaseAdapter.getCachedEmbeddings({
+        const result = await this.runtime.databaseAdapter.getCachedEmbeddings({
             query_table_name: this.tableName,
             query_threshold: 2,
             query_input: content,
             query_field_name: "content",
-            query_field_sub_name: "text",
+            query_field_sub_name: "content",
             query_match_count: 10,
         });
+        return result;
     }
 
     /**
@@ -138,6 +121,7 @@ export class MemoryManager implements IMemoryManager {
         embedding: number[],
         opts: {
             match_threshold?: number;
+            agentId?: UUID;
             count?: number;
             roomId: UUID;
             unique?: boolean;
@@ -150,15 +134,17 @@ export class MemoryManager implements IMemoryManager {
             unique,
         } = opts;
 
-        const result = await this.runtime.databaseAdapter.searchMemories({
+        const searchOpts = {
             tableName: this.tableName,
             roomId,
-            agentId: this.runtime.agentId,
             embedding: embedding,
             match_threshold: match_threshold,
             match_count: count,
             unique: !!unique,
-        });
+        };
+
+        const result =
+            await this.runtime.databaseAdapter.searchMemories(searchOpts);
 
         return result;
     }
@@ -170,36 +156,45 @@ export class MemoryManager implements IMemoryManager {
      * @returns A Promise that resolves when the operation completes.
      */
     async createMemory(memory: Memory, unique = false): Promise<void> {
-        // TODO: check memory.agentId == this.runtime.agentId
+       //console.log("\n=== Debug: MemoryManager.createMemory ===");
+       //console.log("Attempting to create memory:", {
+       //    id: memory.id,
+       //    source: memory.content.source,
+       //    text: memory.content.text?.slice(0, 100)
+       //});
 
-        const existingMessage =
-            await this.runtime.databaseAdapter.getMemoryById(memory.id);
-
+        const existingMessage = await this.runtime.databaseAdapter.getMemoryById(memory.id);
         if (existingMessage) {
-            elizaLogger.debug("Memory already exists, skipping");
+            console.log("Memory already exists, skipping");
             return;
         }
 
-        elizaLogger.log("Creating Memory", memory.id, memory.content.text);
-
-        await this.runtime.databaseAdapter.createMemory(
-            memory,
-            this.tableName,
-            unique
-        );
+        try {
+            await this.runtime.databaseAdapter.createMemory(
+                memory,
+                this.tableName,
+                unique
+            );
+            console.log("Memory created successfully");
+        } catch (error) {
+            console.error("Error creating memory:", error);
+            throw error;
+        }
     }
 
-    async getMemoriesByRoomIds(params: { roomIds: UUID[] }): Promise<Memory[]> {
-        return await this.runtime.databaseAdapter.getMemoriesByRoomIds({
-            tableName: this.tableName,
-            agentId: this.runtime.agentId,
+    async getMemoriesByRoomIds(params: {
+        agentId?: UUID;
+        roomIds: UUID[];
+    }): Promise<Memory[]> {
+        const result = await this.runtime.databaseAdapter.getMemoriesByRoomIds({
+            agentId: params.agentId,
             roomIds: params.roomIds,
         });
+        return result;
     }
 
     async getMemoryById(id: UUID): Promise<Memory | null> {
         const result = await this.runtime.databaseAdapter.getMemoryById(id);
-        if (result && result.agentId !== this.runtime.agentId) return null;
         return result;
     }
 

@@ -5,7 +5,6 @@ node_modules
 .env.production
 concatenated-output.ts
 embedding-cache.json
-packages/plugin-buttplug/intiface-engine
 
 .DS_Store
 
@@ -34,16 +33,14 @@ tweetcache/
 twitter_cookies.json
 timeline_cache.json
 
-*.sqlite
+packages/client-twitter/src/tweetcache/*
 
-characters/
+*.sqlite
+# Ignore all *.json files (e.g. naval.json)
+characters/*.json
+# Allow anything with the *.character.json extension to be tracked (e.g. trump.character.json)
+!characters/*.character.json 
 
 packages/core/src/providers/cache
 packages/core/src/providers/cache/*
 cache/*
-packages/plugin-coinbase/src/plugins/transactions.csv
-packages/plugin-coinbase/package-lock.json
-
-tsup.config.bundled_*.mjs
-
-.turbo
